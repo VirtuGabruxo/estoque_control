@@ -95,7 +95,7 @@ export async function registerUser({
       crypt($2, gen_salt('bf')),
       NOW(),
       '{"provider":"email","providers":["email"]}'::jsonb,
-      json_build_object('nome', $3, 'sobrenome', $4)::jsonb,
+      json_build_object('nome', $3::text, 'sobrenome', $4::text)::jsonb,
       NOW(),
       NOW()
     ) RETURNING id`,
