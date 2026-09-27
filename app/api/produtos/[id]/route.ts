@@ -4,13 +4,15 @@ import { getCurrentUser } from '@/lib/auth';
 
 export async function GET(
   request: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const user = await getCurrentUser();
     if (!user) {
       return NextResponse.json({ error: 'Não autenticado' }, { status: 401 });
     }
+
+    const { id } = await params;
 
     const prodRes = await query(
       `SELECT p.id, p.nome, p.codigo_barras, p.categoria_id, c.nome as categoria_nome,
@@ -19,7 +21,7 @@ export async function GET(
        FROM produtos p
        LEFT JOIN categorias c ON c.id = p.categoria_id
        WHERE p.id = $1`,
-      [params.id]
+      [id]
     );
 
     if (prodRes.rows.length === 0) {
@@ -33,7 +35,7 @@ export async function GET(
        FROM lotes_estoque
        WHERE produto_id = $1 AND quantidade > 0
        ORDER BY data_validade ASC`,
-      [params.id]
+      [id]
     );
 
     produto.lotes = lotesRes.rows;
@@ -45,7 +47,7 @@ export async function GET(
 
 export async function PUT(
   request: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const user = await getCurrentUser();
@@ -53,6 +55,7 @@ export async function PUT(
       return NextResponse.json({ error: 'Não autenticado' }, { status: 401 });
     }
 
+    const { id } = await params;
     const body = await request.json();
     const { nome, categoria_id } = body;
 
@@ -62,7 +65,7 @@ export async function PUT(
            categoria_id = COALESCE($2, categoria_id)
        WHERE id = $3
        RETURNING *`,
-      [nome?.trim(), categoria_id, params.id]
+      [nome?.trim(), categoria_id, id]
     );
 
     if (res.rows.length === 0) {

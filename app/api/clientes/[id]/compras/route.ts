@@ -4,7 +4,7 @@ import { getCurrentUser } from '@/lib/auth';
 
 export async function GET(
   request: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const user = await getCurrentUser();
@@ -12,13 +12,14 @@ export async function GET(
       return NextResponse.json({ error: 'Não autenticado' }, { status: 401 });
     }
 
+    const { id } = await params;
     const { searchParams } = new URL(request.url);
     const mes = searchParams.get('mes'); // YYYY-MM
 
     // 1. Get client info
     const clientRes = await query(
       `SELECT id, nome, telefone, criado_em, atualizado_em FROM clientes WHERE id = $1`,
-      [params.id]
+      [id]
     );
 
     if (clientRes.rows.length === 0) {
@@ -33,7 +34,7 @@ export async function GET(
       FROM lancamentos_fiado
       WHERE cliente_id = $1
     `;
-    const queryParams: any[] = [params.id];
+    const queryParams: any[] = [id];
 
     if (mes) {
       queryParams.push(`${mes}-01`);
@@ -49,7 +50,7 @@ export async function GET(
       `SELECT COALESCE(SUM(valor), 0)::numeric as total 
        FROM lancamentos_fiado 
        WHERE cliente_id = $1 AND pago = false`,
-      [params.id]
+      [id]
     );
 
     // Also get debt for the filtered month if filter is active
@@ -60,7 +61,7 @@ export async function GET(
          FROM lancamentos_fiado 
          WHERE cliente_id = $1 AND pago = false
            AND data_compra >= $2::date AND data_compra < ($2::date + INTERVAL '1 month')`,
-        [params.id, `${mes}-01`]
+        [id, `${mes}-01`]
       );
       dividaMesFiltrado = dividaMesRes.rows[0]?.total || 0;
     }
@@ -79,7 +80,7 @@ export async function GET(
 
 export async function POST(
   request: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const user = await getCurrentUser();
@@ -87,6 +88,7 @@ export async function POST(
       return NextResponse.json({ error: 'Não autenticado' }, { status: 401 });
     }
 
+    const { id } = await params;
     const body = await request.json();
     const { descricao, data_compra, quantidade, valor, pago, forma_pagamento } = body;
 
@@ -109,7 +111,7 @@ export async function POST(
        ) VALUES ($1, $2, COALESCE($3::date, CURRENT_DATE), COALESCE($4, 1), $5, COALESCE($6, false), $7)
        RETURNING *`,
       [
-        params.id,
+        id,
         descricao.trim(),
         data_compra || null,
         parseInt(quantidade, 10) || 1,
@@ -128,7 +130,7 @@ export async function POST(
 
 export async function PUT(
   request: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const user = await getCurrentUser();
@@ -136,10 +138,11 @@ export async function PUT(
       return NextResponse.json({ error: 'Não autenticado' }, { status: 401 });
     }
 
+    const { id } = await params;
     const body = await request.json();
-    const { id, descricao, data_compra, quantidade, valor, pago, forma_pagamento } = body;
+    const { id: lancamentoId, descricao, data_compra, quantidade, valor, pago, forma_pagamento } = body;
 
-    if (!id) {
+    if (!lancamentoId) {
       return NextResponse.json({ error: 'ID do lançamento é obrigatório.' }, { status: 400 });
     }
 
@@ -160,8 +163,8 @@ export async function PUT(
         valor !== undefined ? parseFloat(valor) : null,
         pago !== undefined ? pago : null,
         forma_pagamento,
+        lancamentoId,
         id,
-        params.id,
       ]
     );
 
@@ -178,7 +181,7 @@ export async function PUT(
 
 export async function DELETE(
   request: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const user = await getCurrentUser();
@@ -186,6 +189,7 @@ export async function DELETE(
       return NextResponse.json({ error: 'Não autenticado' }, { status: 401 });
     }
 
+    const { id } = await params;
     const { searchParams } = new URL(request.url);
     const purchaseId = searchParams.get('purchase_id');
 
@@ -195,7 +199,7 @@ export async function DELETE(
 
     await query(
       `DELETE FROM lancamentos_fiado WHERE id = $1 AND cliente_id = $2`,
-      [purchaseId, params.id]
+      [purchaseId, id]
     );
 
     return NextResponse.json({ success: true });
