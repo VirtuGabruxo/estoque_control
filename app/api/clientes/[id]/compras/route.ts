@@ -28,9 +28,10 @@ export async function GET(
 
     const cliente = clientRes.rows[0];
 
-    // 2. Query purchases with optional month filter
+    // 2. Query all lancamentos (compras + pagamentos) with optional month filter
     let sql = `
-      SELECT id, cliente_id, descricao, data_compra, quantidade, valor, pago, forma_pagamento, criado_em, atualizado_em
+      SELECT id, cliente_id, tipo, descricao, nome_comprador, data_compra,
+             quantidade, valor, pago, forma_pagamento, criado_em, atualizado_em
       FROM lancamentos_fiado
       WHERE cliente_id = $1
     `;
@@ -45,32 +46,37 @@ export async function GET(
 
     const purchasesRes = await query(sql, queryParams);
 
-    // 3. Somatório de dívidas (tudo diferente de pago = false para todo o histórico do cliente)
-    const totalDividaRes = await query<{ total: number }>(
-      `SELECT COALESCE(SUM(valor), 0)::numeric as total 
-       FROM lancamentos_fiado 
-       WHERE cliente_id = $1 AND pago = false`,
+    // 3. Dívida total = soma de compras não pagas - soma de pagamentos
+    const totalDividaRes = await query<{ total: string }>(
+      `SELECT (
+         COALESCE(SUM(CASE WHEN tipo = 'compra' AND pago = false THEN valor ELSE 0 END), 0)
+         - COALESCE(SUM(CASE WHEN tipo = 'pagamento' THEN valor ELSE 0 END), 0)
+       )::numeric as total
+       FROM lancamentos_fiado
+       WHERE cliente_id = $1`,
       [id]
     );
 
-    // Also get debt for the filtered month if filter is active
-    let dividaMesFiltrado = totalDividaRes.rows[0]?.total || 0;
+    let dividaMesFiltrado = 0;
     if (mes) {
-      const dividaMesRes = await query<{ total: number }>(
-        `SELECT COALESCE(SUM(valor), 0)::numeric as total 
-         FROM lancamentos_fiado 
-         WHERE cliente_id = $1 AND pago = false
+      const dividaMesRes = await query<{ total: string }>(
+        `SELECT (
+           COALESCE(SUM(CASE WHEN tipo = 'compra' AND pago = false THEN valor ELSE 0 END), 0)
+           - COALESCE(SUM(CASE WHEN tipo = 'pagamento' THEN valor ELSE 0 END), 0)
+         )::numeric as total
+         FROM lancamentos_fiado
+         WHERE cliente_id = $1
            AND data_compra >= $2::date AND data_compra < ($2::date + INTERVAL '1 month')`,
         [id, `${mes}-01`]
       );
-      dividaMesFiltrado = dividaMesRes.rows[0]?.total || 0;
+      dividaMesFiltrado = Math.max(0, Number(dividaMesRes.rows[0]?.total || 0));
     }
 
     return NextResponse.json({
       cliente,
       compras: purchasesRes.rows,
-      somatorioDividaGeral: Number(totalDividaRes.rows[0]?.total || 0),
-      somatorioDividaMes: Number(dividaMesFiltrado),
+      somatorioDividaGeral: Math.max(0, Number(totalDividaRes.rows[0]?.total || 0)),
+      somatorioDividaMes: dividaMesFiltrado,
     });
   } catch (error: any) {
     console.error('Error fetching client purchases:', error);
@@ -78,6 +84,7 @@ export async function GET(
   }
 }
 
+// POST: single item OR batch of items (itens: []) OR pagamento
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -90,7 +97,62 @@ export async function POST(
 
     const { id } = await params;
     const body = await request.json();
-    const { descricao, data_compra, quantidade, valor, pago, forma_pagamento } = body;
+
+    // ── PAGAMENTO ─────────────────────────────────────────────────────────────
+    if (body.tipo === 'pagamento') {
+      const { valor, data_compra, forma_pagamento, descricao } = body;
+      if (!valor || Number(valor) <= 0) {
+        return NextResponse.json({ error: 'Valor do pagamento inválido.' }, { status: 400 });
+      }
+
+      const res = await query(
+        `INSERT INTO lancamentos_fiado
+           (cliente_id, tipo, descricao, data_compra, quantidade, valor, pago, forma_pagamento)
+         VALUES ($1, 'pagamento', $2, COALESCE($3::date, CURRENT_DATE), 1, $4, true, $5)
+         RETURNING *`,
+        [
+          id,
+          descricao?.trim() || 'Pagamento recebido',
+          data_compra || null,
+          parseFloat(valor),
+          forma_pagamento || 'Dinheiro',
+        ]
+      );
+
+      return NextResponse.json(res.rows[0], { status: 201 });
+    }
+
+    // ── BATCH DE ITENS (venda multi-produto) ──────────────────────────────────
+    if (Array.isArray(body.itens) && body.itens.length > 0) {
+      const { itens, data_compra, nome_comprador, pago, forma_pagamento } = body;
+
+      const inserted: any[] = [];
+      for (const item of itens) {
+        if (!item.descricao || !item.valor) continue;
+        const res = await query(
+          `INSERT INTO lancamentos_fiado
+             (cliente_id, tipo, descricao, nome_comprador, data_compra, quantidade, valor, pago, forma_pagamento)
+           VALUES ($1, 'compra', $2, $3, COALESCE($4::date, CURRENT_DATE), $5, $6, $7, $8)
+           RETURNING *`,
+          [
+            id,
+            item.descricao.trim(),
+            nome_comprador?.trim() || null,
+            data_compra || null,
+            parseInt(item.quantidade, 10) || 1,
+            parseFloat(item.valor),
+            pago === true,
+            forma_pagamento || null,
+          ]
+        );
+        inserted.push(res.rows[0]);
+      }
+
+      return NextResponse.json(inserted, { status: 201 });
+    }
+
+    // ── SINGLE ITEM (compatibilidade retroativa / edição) ─────────────────────
+    const { descricao, nome_comprador, data_compra, quantidade, valor, pago, forma_pagamento } = body;
 
     if (!descricao || valor === undefined) {
       return NextResponse.json(
@@ -100,19 +162,14 @@ export async function POST(
     }
 
     const res = await query(
-      `INSERT INTO lancamentos_fiado (
-         cliente_id,
-         descricao,
-         data_compra,
-         quantidade,
-         valor,
-         pago,
-         forma_pagamento
-       ) VALUES ($1, $2, COALESCE($3::date, CURRENT_DATE), COALESCE($4, 1), $5, COALESCE($6, false), $7)
+      `INSERT INTO lancamentos_fiado
+         (cliente_id, tipo, descricao, nome_comprador, data_compra, quantidade, valor, pago, forma_pagamento)
+       VALUES ($1, 'compra', $2, $3, COALESCE($4::date, CURRENT_DATE), COALESCE($5, 1), $6, COALESCE($7, false), $8)
        RETURNING *`,
       [
         id,
         descricao.trim(),
+        nome_comprador?.trim() || null,
         data_compra || null,
         parseInt(quantidade, 10) || 1,
         parseFloat(valor),
@@ -140,7 +197,16 @@ export async function PUT(
 
     const { id } = await params;
     const body = await request.json();
-    const { id: lancamentoId, descricao, data_compra, quantidade, valor, pago, forma_pagamento } = body;
+    const {
+      id: lancamentoId,
+      descricao,
+      nome_comprador,
+      data_compra,
+      quantidade,
+      valor,
+      pago,
+      forma_pagamento,
+    } = body;
 
     if (!lancamentoId) {
       return NextResponse.json({ error: 'ID do lançamento é obrigatório.' }, { status: 400 });
@@ -148,21 +214,23 @@ export async function PUT(
 
     const res = await query(
       `UPDATE lancamentos_fiado
-       SET descricao = COALESCE($1, descricao),
-           data_compra = COALESCE($2::date, data_compra),
-           quantidade = COALESCE($3, quantidade),
-           valor = COALESCE($4, valor),
-           pago = COALESCE($5, pago),
-           forma_pagamento = COALESCE($6, forma_pagamento)
-       WHERE id = $7 AND cliente_id = $8
+       SET descricao        = COALESCE($1, descricao),
+           nome_comprador   = $2,
+           data_compra      = COALESCE($3::date, data_compra),
+           quantidade       = COALESCE($4, quantidade),
+           valor            = COALESCE($5, valor),
+           pago             = COALESCE($6, pago),
+           forma_pagamento  = COALESCE($7, forma_pagamento)
+       WHERE id = $8 AND cliente_id = $9
        RETURNING *`,
       [
-        descricao?.trim(),
+        descricao?.trim() || null,
+        nome_comprador?.trim() || null,
         data_compra || null,
         quantidade !== undefined ? parseInt(quantidade, 10) : null,
         valor !== undefined ? parseFloat(valor) : null,
         pago !== undefined ? pago : null,
-        forma_pagamento,
+        forma_pagamento || null,
         lancamentoId,
         id,
       ]

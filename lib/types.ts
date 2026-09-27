@@ -85,7 +85,9 @@ export interface Cliente {
 export interface LancamentoFiado {
   id: string;
   cliente_id: string;
+  tipo: 'compra' | 'pagamento';
   descricao: string;
+  nome_comprador?: string;
   data_compra: string;
   quantidade: number;
   valor: number;
