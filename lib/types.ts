@@ -76,6 +76,7 @@ export interface Cliente {
   id: string;
   nome: string;
   telefone?: string;
+  ativo: boolean;
   criado_em: string;
   atualizado_em: string;
   total_divida?: number;
